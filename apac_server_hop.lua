@@ -17,50 +17,10 @@ if not requestfunc then
     error("当前执行器不支持 HTTP 请求")
 end
 
-local MAX_SERVER_PAGES = 4
-local REGION_WORKERS = 6
-local SERVER_BATCH_SIZE = 12
+local MAX_SERVER_PAGES = 3
 local PAGE_YIELD_SECONDS = 0.1
-
--- 已知 APAC 地区位置 ID
--- 0 = Singapore
--- 5 = Tokyo
--- 7 = Mumbai
--- 9 = Sydney
--- 20 = Osaka
-local APAC_LOCATION_IDS = {
-    ["0"] = "Singapore",
-    ["5"] = "Tokyo",
-    ["7"] = "Mumbai",
-    ["9"] = "Sydney",
-    ["20"] = "Osaka",
-}
-
--- 从公开 RoLocate 数据中裁剪出的 APAC datacenter 映射
-local DATACENTER_TO_LOCATION = {
-    ["295"] = "0", ["372"] = "0", ["416"] = "0", ["417"] = "0", ["430"] = "0",
-    ["440"] = "0", ["441"] = "0", ["455"] = "0", ["456"] = "0", ["462"] = "0",
-    ["465"] = "0", ["513"] = "0", ["514"] = "0", ["515"] = "0", ["516"] = "0",
-    ["517"] = "0", ["25931"] = "0", ["25939"] = "0", ["26030"] = "0", ["26032"] = "0",
-    ["26033"] = "0", ["26034"] = "0", ["26035"] = "0", ["26036"] = "0", ["26037"] = "0",
-    ["26125"] = "0", ["26132"] = "0",
-
-    ["337"] = "5", ["377"] = "5", ["425"] = "5", ["25506"] = "5", ["26127"] = "5",
-
-    ["359"] = "7", ["518"] = "7", ["519"] = "7", ["520"] = "7", ["521"] = "7",
-    ["533"] = "7", ["534"] = "7", ["26120"] = "7", ["26123"] = "7",
-
-    ["369"] = "9", ["450"] = "9", ["471"] = "9",
-
-    ["25825"] = "20", ["25826"] = "20", ["25827"] = "20", ["25828"] = "20",
-    ["25829"] = "20", ["25830"] = "20", ["25832"] = "20", ["25833"] = "20",
-    ["25834"] = "20", ["25835"] = "20", ["25837"] = "20", ["25838"] = "20",
-    ["25839"] = "20", ["25840"] = "20", ["25841"] = "20", ["25842"] = "20",
-    ["25843"] = "20", ["25844"] = "20", ["25845"] = "20", ["25846"] = "20",
-    ["25850"] = "20", ["26129"] = "20",
-}
-
-local regionCache = {}
+local MAX_PING = 120
+local MIN_FPS = 15
 
 local function httpRequest(options)
     local ok, response = pcall(function()
@@ -78,62 +38,6 @@ local function httpRequest(options)
     return response, nil
 end
 
-local function getServerLocationName(serverId)
-    if regionCache[serverId] ~= nil then
-        return regionCache[serverId]
-    end
-
-    local response, err = httpRequest({
-        Url = "https://gamejoin.roblox.com/v1/join-game-instance",
-        Method = "POST",
-        Headers = {
-            ["Content-Type"] = "application/json",
-            ["User-Agent"] = "Roblox/WinInet",
-        },
-        Body = HttpService:JSONEncode({
-            placeId = PlaceId,
-            gameId = serverId,
-        })
-    })
-
-    if not response then
-        warn("获取服务器地区失败:", err)
-        regionCache[serverId] = false
-        return false
-    end
-
-    if response.StatusCode ~= 200 then
-        warn("join-game-instance 状态码异常:", response.StatusCode)
-        regionCache[serverId] = false
-        return false
-    end
-
-    local ok, data = pcall(function()
-        return HttpService:JSONDecode(response.Body)
-    end)
-
-    if not ok or not data then
-        regionCache[serverId] = false
-        return false
-    end
-
-    local datacenterId = data.joinScript and data.joinScript.DataCenterId
-    if not datacenterId then
-        regionCache[serverId] = false
-        return false
-    end
-
-    local locationId = DATACENTER_TO_LOCATION[tostring(datacenterId)]
-    if not locationId then
-        regionCache[serverId] = false
-        return false
-    end
-
-    local locationName = APAC_LOCATION_IDS[locationId]
-    regionCache[serverId] = locationName or false
-    return regionCache[serverId]
-end
-
 local function fetchServerPage(cursor)
     local url = "https://games.roblox.com/v1/games/" .. PlaceId .. "/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true"
     if cursor and cursor ~= "" then
@@ -145,7 +49,7 @@ local function fetchServerPage(cursor)
         Method = "GET",
         Headers = {
             ["Content-Type"] = "application/json",
-            ["User-Agent"] = "Mozilla/5.0"
+            ["User-Agent"] = "Mozilla/5.0",
         }
     })
 
@@ -168,85 +72,72 @@ local function fetchServerPage(cursor)
     return data, nil
 end
 
-local function createCandidateList(servers)
-    local candidates = {}
-
-    for _, server in ipairs(servers) do
-        if server.id ~= JobId and server.playing and server.maxPlayers and server.playing < server.maxPlayers then
-            candidates[#candidates + 1] = server
-        end
-    end
-
-    return candidates
+local function isJoinableServer(server)
+    return server
+        and server.id
+        and server.id ~= JobId
+        and type(server.playing) == "number"
+        and type(server.maxPlayers) == "number"
+        and server.playing < server.maxPlayers
 end
 
-local function resolveBestServerInBatch(candidates, bestServer)
-    local index = 1
-    local activeWorkers = 0
-    local batchBest = bestServer
-    local finished = false
-    local doneEvent = Instance.new("BindableEvent")
-
-    local function finalizeWorker()
-        activeWorkers -= 1
-        if finished and activeWorkers <= 0 then
-            doneEvent:Fire()
-        end
+local function normalizePing(server)
+    if type(server.ping) == "number" and server.ping > 0 then
+        return server.ping
     end
 
-    local function worker()
-        while true do
-            local server = candidates[index]
-            index += 1
-
-            if not server then
-                break
-            end
-
-            if batchBest and server.playing < batchBest.playing then
-                break
-            end
-
-            local locationName = getServerLocationName(server.id)
-            if locationName then
-                print(string.format("发现 APAC 服务器 | %s | 人数: %d | JobId: %s", locationName, server.playing, server.id))
-
-                if (not batchBest) or (server.playing > batchBest.playing) then
-                    batchBest = {
-                        id = server.id,
-                        playing = server.playing,
-                        location = locationName,
-                    }
-                end
-            end
-
-            task.wait()
-        end
-
-        finalizeWorker()
-    end
-
-    activeWorkers = math.min(REGION_WORKERS, #candidates)
-    if activeWorkers == 0 then
-        doneEvent:Destroy()
-        return batchBest
-    end
-
-    for _ = 1, activeWorkers do
-        task.spawn(worker)
-    end
-
-    finished = true
-    if activeWorkers > 0 then
-        doneEvent.Event:Wait()
-    end
-    doneEvent:Destroy()
-
-    return batchBest
+    return math.huge
 end
 
-local function HopToMostPopulatedAPAC()
-    print("正在寻找亚太地区人数最多的服务器...")
+local function normalizeFps(server)
+    if type(server.fps) == "number" and server.fps > 0 then
+        return server.fps
+    end
+
+    return 0
+end
+
+local function isPreferredNearbyServer(server)
+    return normalizePing(server) <= MAX_PING and normalizeFps(server) >= MIN_FPS
+end
+
+local function isBetterServer(candidate, currentBest)
+    if not currentBest then
+        return true
+    end
+
+    local candidatePreferred = isPreferredNearbyServer(candidate)
+    local currentPreferred = isPreferredNearbyServer(currentBest)
+
+    if candidatePreferred ~= currentPreferred then
+        return candidatePreferred
+    end
+
+    if candidate.playing ~= currentBest.playing then
+        return candidate.playing > currentBest.playing
+    end
+
+    local candidatePing = normalizePing(candidate)
+    local currentPing = normalizePing(currentBest)
+    if candidatePing ~= currentPing then
+        return candidatePing < currentPing
+    end
+
+    return normalizeFps(candidate) > normalizeFps(currentBest)
+end
+
+local function formatServerInfo(server)
+    return string.format(
+        "人数: %d | Ping: %s | FPS: %s | JobId: %s",
+        server.playing,
+        server.ping ~= nil and tostring(server.ping) or "N/A",
+        server.fps ~= nil and tostring(server.fps) or "N/A",
+        server.id
+    )
+end
+
+local function HopToBestNearbyPopulatedServer()
+    print("正在寻找高人数且低延迟的服务器...")
 
     local bestServer = nil
     local cursor = nil
@@ -263,33 +154,11 @@ local function HopToMostPopulatedAPAC()
             break
         end
 
-        local candidates = createCandidateList(servers)
-        for startIndex = 1, #candidates, SERVER_BATCH_SIZE do
-            local batch = {}
-
-            for offset = 0, SERVER_BATCH_SIZE - 1 do
-                local server = candidates[startIndex + offset]
-                if not server then
-                    break
-                end
-
-                if bestServer and server.playing < bestServer.playing then
-                    break
-                end
-
-                batch[#batch + 1] = server
+        for _, server in ipairs(servers) do
+            if isJoinableServer(server) and isBetterServer(server, bestServer) then
+                bestServer = server
+                print("当前最佳服务器 -> " .. formatServerInfo(server))
             end
-
-            if #batch == 0 then
-                break
-            end
-
-            bestServer = resolveBestServerInBatch(batch, bestServer)
-            task.wait()
-        end
-
-        if bestServer and servers[#servers] and servers[#servers].playing < bestServer.playing then
-            break
         end
 
         cursor = pageData.nextPageCursor
@@ -301,16 +170,11 @@ local function HopToMostPopulatedAPAC()
     end
 
     if not bestServer then
-        warn("没有找到可加入的亚太高人数服务器")
+        warn("没有找到可加入的目标服务器")
         return
     end
 
-    print(string.format(
-        "准备跳转 -> %s | 人数: %d | JobId: %s",
-        bestServer.location,
-        bestServer.playing,
-        bestServer.id
-    ))
+    print("准备跳转 -> " .. formatServerInfo(bestServer))
 
     local ok, tpErr = pcall(function()
         TeleportService:TeleportToPlaceInstance(PlaceId, bestServer.id, LocalPlayer)
@@ -321,4 +185,4 @@ local function HopToMostPopulatedAPAC()
     end
 end
 
-HopToMostPopulatedAPAC()
+HopToBestNearbyPopulatedServer()
