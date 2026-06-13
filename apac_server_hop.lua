@@ -140,22 +140,25 @@ local function ipToInteger(ip)
     return (a * 16777216) + (b * 65536) + (c * 256) + d
 end
 
+-- CIDR 范围计算（纯 Lua 实现，不依赖 bit32 / & 运算符，兼容所有执行器）
+-- /n 表示前 n 位为网络位，后 32-n 位为主机位
 local function cidrToRange(cidr)
     local ipPart, bits = cidr:match("([%d%.]+)/(%d+)")
     if not (ipPart and bits) then return nil end
     bits = tonumber(bits)
     local ipInt = ipToInteger(ipPart)
     if not ipInt then return nil end
-    local mask = bit32 and bit32.lshift(bit32.bnot(0), 32 - bits) or 0
-    -- 纯 Lua 回退方案
-    if mask == 0 then
-        mask = (2^32 - 1) - (2^(32 - bits) - 1)
-    else
-        mask = bit32.lshift(bit32.bnot(0), 32 - bits)
-    end
-    mask = mask & 0xFFFFFFFF
-    local startIp = ipInt & mask
-    local endIp = startIp + (2^(32 - bits) - 1)
+
+    -- 主机位数 = 32 - 网络位数
+    local hostBits = 32 - bits
+    -- 主机数量 = 2^hostBits（Lua 双精度浮点，范围足够）
+    local hostCount = 2^hostBits
+
+    -- 起始 IP = 当前 IP 去掉主机位（向下取整到网络边界）
+    local startIp = ipInt - (ipInt % hostCount)
+    -- 结束 IP = 起始 IP + 主机数量 - 1
+    local endIp = startIp + hostCount - 1
+
     return startIp, endIp
 end
 
