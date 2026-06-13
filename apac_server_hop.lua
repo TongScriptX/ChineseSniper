@@ -18,6 +18,9 @@ if not requestfunc then
 end
 
 local MAX_SERVER_PAGES = 4
+local REGION_WORKERS = 6
+local SERVER_BATCH_SIZE = 12
+local PAGE_YIELD_SECONDS = 0.1
 
 -- 已知 APAC 地区位置 ID
 -- 0 = Singapore
@@ -165,6 +168,83 @@ local function fetchServerPage(cursor)
     return data, nil
 end
 
+local function createCandidateList(servers)
+    local candidates = {}
+
+    for _, server in ipairs(servers) do
+        if server.id ~= JobId and server.playing and server.maxPlayers and server.playing < server.maxPlayers then
+            candidates[#candidates + 1] = server
+        end
+    end
+
+    return candidates
+end
+
+local function resolveBestServerInBatch(candidates, bestServer)
+    local index = 1
+    local activeWorkers = 0
+    local batchBest = bestServer
+    local finished = false
+    local doneEvent = Instance.new("BindableEvent")
+
+    local function finalizeWorker()
+        activeWorkers -= 1
+        if finished and activeWorkers <= 0 then
+            doneEvent:Fire()
+        end
+    end
+
+    local function worker()
+        while true do
+            local server = candidates[index]
+            index += 1
+
+            if not server then
+                break
+            end
+
+            if batchBest and server.playing < batchBest.playing then
+                break
+            end
+
+            local locationName = getServerLocationName(server.id)
+            if locationName then
+                print(string.format("发现 APAC 服务器 | %s | 人数: %d | JobId: %s", locationName, server.playing, server.id))
+
+                if (not batchBest) or (server.playing > batchBest.playing) then
+                    batchBest = {
+                        id = server.id,
+                        playing = server.playing,
+                        location = locationName,
+                    }
+                end
+            end
+
+            task.wait()
+        end
+
+        finalizeWorker()
+    end
+
+    activeWorkers = math.min(REGION_WORKERS, #candidates)
+    if activeWorkers == 0 then
+        doneEvent:Destroy()
+        return batchBest
+    end
+
+    for _ = 1, activeWorkers do
+        task.spawn(worker)
+    end
+
+    finished = true
+    if activeWorkers > 0 then
+        doneEvent.Event:Wait()
+    end
+    doneEvent:Destroy()
+
+    return batchBest
+end
+
 local function HopToMostPopulatedAPAC()
     print("正在寻找亚太地区人数最多的服务器...")
 
@@ -183,26 +263,29 @@ local function HopToMostPopulatedAPAC()
             break
         end
 
-        for _, server in ipairs(servers) do
-            if bestServer and server.playing < bestServer.playing then
+        local candidates = createCandidateList(servers)
+        for startIndex = 1, #candidates, SERVER_BATCH_SIZE do
+            local batch = {}
+
+            for offset = 0, SERVER_BATCH_SIZE - 1 do
+                local server = candidates[startIndex + offset]
+                if not server then
+                    break
+                end
+
+                if bestServer and server.playing < bestServer.playing then
+                    break
+                end
+
+                batch[#batch + 1] = server
+            end
+
+            if #batch == 0 then
                 break
             end
 
-            if server.id ~= JobId and server.playing and server.maxPlayers and server.playing < server.maxPlayers then
-                local locationName = getServerLocationName(server.id)
-
-                if locationName then
-                    print(string.format("发现 APAC 服务器 | %s | 人数: %d | JobId: %s", locationName, server.playing, server.id))
-
-                    if (not bestServer) or (server.playing > bestServer.playing) then
-                        bestServer = {
-                            id = server.id,
-                            playing = server.playing,
-                            location = locationName,
-                        }
-                    end
-                end
-            end
+            bestServer = resolveBestServerInBatch(batch, bestServer)
+            task.wait()
         end
 
         if bestServer and servers[#servers] and servers[#servers].playing < bestServer.playing then
@@ -214,7 +297,7 @@ local function HopToMostPopulatedAPAC()
             break
         end
 
-        task.wait(0.15)
+        task.wait(PAGE_YIELD_SECONDS)
     end
 
     if not bestServer then
