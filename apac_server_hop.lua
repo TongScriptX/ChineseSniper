@@ -392,9 +392,9 @@ end
 
 -- Ping 层级的数值权重（数字越小优先级越高）
 local PING_TIER_WEIGHTS = {
-    local  = 0,
+    ["local"] = 0,
     nearby = 1,
-    far    = 2,
+    far = 2,
 }
 
 -- 判断服务器是否在首选地区内
@@ -580,21 +580,21 @@ local function HopToBestNearbyPopulatedServer()
 
     -- ---- 步骤 5: 筛选 + 排序 ----
     -- 按 Ping 层级分类统计
-    local tierBuckets = { local = {}, nearby = {}, far = {} }
+    local tierBuckets = { ["local"] = {}, nearby = {}, far = {} }
     for _, server in ipairs(allServers) do
         local tier = getServerPingTier(server, pingProfile)
         table.insert(tierBuckets[tier], server)
     end
 
     print(string.format("\n服务器分布:"))
-    print(string.format("  📍 本地 (Ping ≤ %dms): %d 个", pingProfile.local_max, #tierBuckets.local))
+    print(string.format("  📍 本地 (Ping ≤ %dms): %d 个", pingProfile.local_max, #tierBuckets["local"]))
     print(string.format("  📍 邻近 (Ping ≤ %dms): %d 个", pingProfile.nearby_max, #tierBuckets.nearby))
     print(string.format("  🌍 远程: %d 个", #tierBuckets.far))
 
     -- 优先选择本地服务器中人数最多的
     -- 如果没有本地服务器，选择邻近服务器中人数最多的
     -- 都没有则选远程中最好的
-    local candidatePool = tierBuckets.local
+    local candidatePool = tierBuckets["local"]
     if #candidatePool == 0 then
         candidatePool = tierBuckets.nearby
     end
@@ -602,7 +602,7 @@ local function HopToBestNearbyPopulatedServer()
         candidatePool = tierBuckets.far
     end
 
-    local tierLabel = (candidatePool == tierBuckets.local) and "本地" or
+    local tierLabel = (candidatePool == tierBuckets["local"]) and "本地" or
                       (candidatePool == tierBuckets.nearby) and "邻近" or "远程"
 
     -- 从候选池中找出最佳服务器
