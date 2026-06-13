@@ -7,15 +7,28 @@ local JobId = game.JobId
 local LocalPlayer = Players.LocalPlayer
 
 -- 执行器 HTTP 请求函数适配
+local function getExecutorEnv()
+    if type(getgenv) == "function" then
+        local ok, env = pcall(getgenv)
+        if ok and type(env) == "table" then
+            return env
+        end
+    end
+    return _G
+end
+
 local function resolveRequestFunction()
+    local executorEnv = getExecutorEnv()
     local candidates = {
         syn and syn.request,
         http and http.request,
         http_request,
+        httprequest,
         fluxus and fluxus.request,
         request,
-        getgenv and getgenv().request,
-        getgenv and getgenv().http_request,
+        executorEnv and executorEnv.request,
+        executorEnv and executorEnv.http_request,
+        executorEnv and executorEnv.httprequest,
     }
 
     for _, candidate in ipairs(candidates) do
@@ -23,6 +36,41 @@ local function resolveRequestFunction()
             return candidate
         end
     end
+end
+
+local function normalizeResponse(response)
+    if type(response) ~= "table" then
+        return response
+    end
+
+    local body = response.Body
+    if body == nil then
+        body = response.body
+    end
+
+    local statusCode = response.StatusCode
+    if statusCode == nil then
+        statusCode = response.statusCode
+    end
+    if statusCode == nil then
+        statusCode = response.Status
+    end
+    if statusCode == nil then
+        statusCode = response.status
+    end
+
+    local success = response.Success
+    if success == nil then
+        success = response.success
+    end
+    if success == nil and type(statusCode) == "number" then
+        success = statusCode >= 200 and statusCode < 300
+    end
+
+    response.Body = body
+    response.StatusCode = statusCode
+    response.Success = success
+    return response
 end
 
 local requestfunc = resolveRequestFunction()
@@ -296,7 +344,7 @@ local function httpRequest(options)
         return nil, "空响应"
     end
 
-    return response, nil
+    return normalizeResponse(response), nil
 end
 
 local function fetchServerPage(cursor)
