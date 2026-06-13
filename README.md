@@ -16,5 +16,6 @@
 ## 说明
 
 - 这是执行器脚本，不是标准 Roblox Studio 内的 `LocalScript`。
+- 如果报错类似 `[MessageError] ... attempt to call a nil value`，通常表示脚本被放进了 Roblox `LocalScript` 环境，执行器提供的 `request/http_request` API 不存在。
 - Roblox 当前这条地区探测方案会返回 `401`，因此这里改为只用公开接口做“低延迟高人数”近似筛选。
 - 这能明显减少卡顿，但无法再精确断言 `Hong Kong`、`Taiwan`、`Singapore` 这类具体机房名称。

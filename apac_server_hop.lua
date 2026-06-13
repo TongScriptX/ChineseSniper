@@ -7,15 +7,30 @@ local JobId = game.JobId
 local LocalPlayer = Players.LocalPlayer
 
 -- 执行器 HTTP 请求函数适配
-local requestfunc =
-    syn and syn.request or
-    http and http.request or
-    http_request or
-    fluxus and fluxus.request or
-    request
+local function resolveRequestFunction()
+    local candidates = {
+        syn and syn.request,
+        http and http.request,
+        http_request,
+        fluxus and fluxus.request,
+        request,
+        getgenv and getgenv().request,
+        getgenv and getgenv().http_request,
+    }
+
+    for _, candidate in ipairs(candidates) do
+        if type(candidate) == "function" then
+            return candidate
+        end
+    end
+end
+
+local requestfunc = resolveRequestFunction()
 
 if not requestfunc then
-    error("当前执行器不支持 HTTP 请求")
+    error(
+        "未找到可用的 HTTP request 函数。这个脚本是执行器脚本，不支持直接放进 Roblox LocalScript/Studio 运行。"
+    )
 end
 
 -- ============================================================================
